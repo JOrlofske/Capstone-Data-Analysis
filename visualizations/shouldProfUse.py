@@ -2,7 +2,7 @@
 #
 # visualizes manually-coded qualitative data from the open-ended question:
 #   "What are your thoughts on instructors using AI in your courses?
-#    (for example: using AI for feedback, assessment, or course design)"
+#    (for example: using AI for feedback, assessment, or course design)" 
 #
 # this question only exists in fall 2024. the coding was done by hand in excel.
 # each response was tagged with:

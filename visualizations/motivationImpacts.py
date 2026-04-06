@@ -1,4 +1,4 @@
-# visualizations/motivationAttitudes.py
+# visualizations/motivationAttitudes.py 
 #
 # how does the existence of AI tools impact students' motivation and feelings
 # about writing? the survey asks 4 core attitude questions across 4 semesters
