@@ -10,6 +10,21 @@
 # AND the per-use-case frequency questions, so thats all we can do this with.
 #
 # outputs go in output/belief_vs_behavior/
+#   per semester:
+#     {prefix}_concordance.png              - concordance stacked bar (4 quadrants per use-case)
+#     {prefix}_grouped_bar.png              - side-by-side: % allowed vs % who use
+#     {prefix}_full_scatter.png             - scatter+OLS: all 11 permitted × all 9/11 freq items
+#     {prefix}_full_density_heatmap.png     - 2d histogram heatmap of the full scatter data
+#     {prefix}_matched_scatter.png          - scatter+OLS: all 11 permitted × 4 matched freq items only
+#     {prefix}_matched_density_heatmap.png  - 2d histogram heatmap of the matched scatter data
+#     {prefix}_matched_significance.png     - chi-squared test on the 4 matched pairs
+#   combined:
+#     combined_concordance.png              - averaged concordance across semesters
+#     combined_grouped_bar.png              - averaged grouped bar across semesters
+#     combined_full_scatter.png             - pooled scatter+OLS, 9 shared freq items (no translation/programming)
+#     combined_full_density_heatmap.png     - pooled density heatmap, 9 shared freq items
+#     combined_matched_scatter.png          - pooled scatter+OLS, 4 matched items on both axes
+#     combined_matched_density_heatmap.png  - pooled density heatmap, 4 matched items
 
 from __future__ import annotations
 from collections import Counter, defaultdict
@@ -22,6 +37,7 @@ import pandas as pd
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+from scipy import stats
 
 
 VIZ_NAME = "Belief vs. behavior: Do students practice what they preach? (Spring 2024-Fall 2024)"
@@ -227,10 +243,15 @@ def classify_pair(df, permitted_code_col, permitted_code, freq_num_col, freq_lab
     )
 
 
-def compute_scores(df, permitted_code_col, freq_items):
+def compute_scores(df, permitted_code_col, freq_items, permitted_keys=None):
     # produces a per-respondent (permissiveness_score, usage_breadth) pair for the scatter.
-    # permissiveness = how many of the 11 permitted items they selected
-    # usage = how many freq items they answered something other than never
+    # permissiveness = how many of the permitted_keys the respondent selected.
+    # usage = how many of the passed-in freq items they answered something other than never.
+    # permitted_keys defaults to all 11 codes from PERMITTED_CODE_MAP, but callers can
+    # pass a smaller set (e.g. just the 4 matched codes) to restrict the X axis too.
+    if permitted_keys is None:
+        permitted_keys = set(PERMITTED_CODE_MAP.keys())
+
     df2          = df.iloc[2:]
     perm_scores  = []
     usage_scores = []
@@ -241,7 +262,7 @@ def compute_scores(df, permitted_code_col, freq_items):
         if is_blank(perm_raw):
             continue
         selected   = parse_multiselect_codes(perm_raw)
-        perm_score = len(selected.intersection(PERMITTED_CODE_MAP.keys()))
+        perm_score = len(selected.intersection(permitted_keys))
 
         n_answered = 0
         n_uses     = 0
@@ -379,7 +400,7 @@ def plot_scatter(perm_scores, usage_scores, n_valid, title, output_png):
     )
 
     ax.set_xlabel("Permissiveness score\n(# of use-cases selected as should be allowed, out of 11)")
-    ax.set_ylabel("Usage breadth\n(# of AI use-case items answered not Never)")
+    ax.set_ylabel("Matched usage breadth\n(# of 4 matched AI use-cases answered != Never)")
     ax.set_xlim(-0.5, 11.5)
     max_use = int(max(usage_scores)) + 1 if usage_scores else 10
     ax.set_ylim(-0.5, max_use + 0.5)
@@ -397,6 +418,355 @@ def plot_scatter(perm_scores, usage_scores, n_valid, title, output_png):
         )
 
     plt.tight_layout()
+    fig.savefig(output_png, dpi=300, bbox_inches="tight")
+    if SHOW_PLOTS:
+        plt.show()
+    plt.close(fig)
+
+
+def plot_density_heatmap(perm_scores, usage_scores, n_valid, max_usage_items, title, output_png, max_perm=11, matched_key=None):
+    # 2d histogram as a heatmap. the scatter plot jitters dots to avoid overlap,
+    # which means it hides where the actual clusters are. this fixes that by
+    # binning into a grid where color = how many respondents land at each
+    # (permissiveness, usage) coordinate. since both axes are already integers
+    # we can just count exact (x, y) pairs instead of doing real binning.
+    # max_perm controls the X axis ceiling — 11 for full, 4 for matched.
+    # matched_key: if provided, draw a legend box listing the matched use-cases
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.set_title(title)
+
+    if not perm_scores:
+        plt.text(0.5, 0.5, "No responses", ha="center", va="center")
+        plt.axis("off")
+        plt.tight_layout()
+        fig.savefig(output_png, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        return
+
+    # build a count grid — both axes are integer-valued so no binning needed
+    max_use   = max_usage_items
+    grid      = np.zeros((max_use + 1, max_perm + 1))
+
+    for p, u in zip(perm_scores, usage_scores):
+        pi = int(round(p))
+        ui = int(round(u))
+        # clamp just in case something weird got through
+        pi = max(0, min(pi, max_perm))
+        ui = max(0, min(ui, max_use))
+        grid[ui, pi] += 1
+
+    # mask zeros so they show as blank/white instead of the lowest color
+    masked = np.ma.masked_where(grid == 0, grid)
+
+    cmap = plt.cm.YlOrRd.copy()
+    cmap.set_bad(color="white")
+
+    im = ax.imshow(
+        masked,
+        origin="lower",
+        aspect="auto",
+        cmap=cmap,
+        extent=[-0.5, max_perm + 0.5, -0.5, max_use + 0.5],
+        vmin=1,
+    )
+
+    # annotate cells that have people in them - helpful for small clusters
+    for ui in range(max_use + 1):
+        for pi in range(max_perm + 1):
+            cnt = int(grid[ui, pi])
+            if cnt > 0:
+                color = "white" if cnt > grid.max() * 0.55 else "black"
+                ax.text(pi, ui, str(cnt), ha="center", va="center",
+                        fontsize=7, color=color)
+
+    ax.set_xlabel(f"Permissiveness score (# of use-cases selected as allowed, out of {max_perm})")
+    ax.set_ylabel(f"Usage breadth (# of {max_usage_items} items answered != Never)")
+    ax.set_xticks(range(0, max_perm + 1))
+    ax.set_yticks(range(0, max_use + 1))
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label("# of respondents")
+
+    # stick the n in the corner so its always visible
+    ax.text(0.98, 0.02, f"n = {n_valid}", transform=ax.transAxes,
+            ha="right", va="bottom", fontsize=10,
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+
+    # if this is a matched chart, show which 4 use-cases are being counted
+    if matched_key:
+        key_text = "Matched use-cases (each adds +1):\n"
+        key_text += "  X: +1 if respondent permitted it\n"
+        key_text += "  Y: +1 if respondent uses it (≠ Never)\n\n"
+        for i, label in enumerate(matched_key, 1):
+            key_text += f"  {i}. {label}\n"
+        fig.text(
+            0.98, 0.50, key_text.rstrip(),
+            transform=fig.transFigure, ha="left", va="center",
+            fontsize=8, family="monospace",
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="#f0f0f0", alpha=0.9),
+        )
+        # nudge the figure to make room for the key on the right
+        fig.subplots_adjust(right=0.68)
+
+    plt.tight_layout()
+    fig.savefig(output_png, dpi=300, bbox_inches="tight")
+    if SHOW_PLOTS:
+        plt.show()
+    plt.close(fig)
+
+
+def plot_scatter_regression(perm_scores, usage_scores, n_valid, title, output_png, max_perm=11, matched_key=None):
+    # same data as the regular scatter but this one actually fits a line through
+    # it and reports the full regression stats (slope, r, r^2, p-value). the
+    # regular scatter only shows r in a text box - this makes the relationship
+    # (or lack thereof) more visually obvious with the line drawn in.
+    # max_perm controls the X axis ceiling — 11 for full, 4 for matched.
+    # matched_key: if provided, draw a legend box listing the matched use-cases
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(9, 8))
+    ax.set_title(title)
+
+    if len(perm_scores) < 3:
+        plt.text(0.5, 0.5, "No responses", ha="center", va="center")
+        plt.axis("off")
+        plt.tight_layout()
+        fig.savefig(output_png, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        return
+
+    px = np.array(perm_scores, dtype=float)
+    uy = np.array(usage_scores, dtype=float)
+
+    # jitter for the dots (same seed as the regular scatter so they match)
+    rng = np.random.default_rng(42)
+    jx  = rng.uniform(-0.25, 0.25, len(px))
+    jy  = rng.uniform(-0.25, 0.25, len(uy))
+
+    ax.scatter(px + jx, uy + jy, alpha=0.35, s=35, edgecolors="none", zorder=2)
+
+    # OLS regression on the raw (unjittered) values
+    slope, intercept, r_val, p_val, std_err = stats.linregress(px, uy)
+
+    # draw the fit line across the full x range
+    x_line = np.linspace(-0.5, max_perm + 0.5, 100)
+    y_line = slope * x_line + intercept
+    ax.plot(x_line, y_line, color="#d73027", linewidth=2, linestyle="--",
+            label="OLS fit", zorder=3)
+
+    # stats box in the corner - put everything useful in one place
+    # p < .001 gets printed as "< .001" since exact tiny floats arent helpful
+    p_str = f"{p_val:.4f}" if p_val >= 0.0001 else "< .0001"
+    stat_text = (
+        f"r = {r_val:.3f}\n"
+        f"r² = {r_val**2:.3f}\n"
+        f"slope = {slope:.3f}\n"
+        f"p = {p_str}\n"
+        f"n = {n_valid}"
+    )
+    ax.text(
+        0.02, 0.98, stat_text,
+        transform=ax.transAxes, va="top", fontsize=10, family="monospace",
+        bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.85),
+    )
+
+    ax.set_xlabel(f"Permissiveness score (# allowed, out of {max_perm})")
+    ax.set_ylabel("Usage breadth (# of AI items used)")
+    ax.set_xlim(-0.5, max_perm + 0.5)
+    max_use = int(max(usage_scores)) + 1
+    ax.set_ylim(-0.5, max_use + 0.5)
+    ax.set_xticks(range(0, max_perm + 1))
+    ax.set_yticks(range(0, max_use + 1))
+    ax.grid(True, alpha=0.2)
+    ax.legend(loc="lower right", frameon=False)
+
+    # if this is a matched chart, show which 4 use-cases are being counted
+    if matched_key:
+        key_text = "Matched use-cases (each adds +1):\n"
+        key_text += "  X: +1 if respondent permitted it\n"
+        key_text += "  Y: +1 if respondent uses it (≠ Never)\n\n"
+        for i, label in enumerate(matched_key, 1):
+            key_text += f"  {i}. {label}\n"
+        fig.text(
+            0.98, 0.50, key_text.rstrip(),
+            transform=fig.transFigure, ha="left", va="center",
+            fontsize=8, family="monospace",
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="#f0f0f0", alpha=0.9),
+        )
+        fig.subplots_adjust(right=0.68)
+
+    plt.tight_layout()
+    fig.savefig(output_png, dpi=300, bbox_inches="tight")
+    if SHOW_PLOTS:
+        plt.show()
+    plt.close(fig)
+
+
+def plot_significance(pair_results, title, output_png):
+    # for each matched pair, build a 2x2 contingency table and run chi-squared.
+    # the table is:
+    #                    Uses    Doesnt use
+    #   Doesnt allow  [  a         b      ]
+    #   Allows        [  c         d      ]
+    #
+    # if belief and behavior are independent (null hypothesis), then the
+    # proportion who use should be the same regardless of whether they allow it.
+    # a significant result means beliefs DO predict behavior to some extent.
+    #
+    # also reports the specific observed vs expected count for the "doesnt allow
+    # & uses anyway" cell, which is the one we actually care about most.
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+
+    if not pair_results:
+        fig = plt.figure(figsize=(12, 6))
+        plt.title(title)
+        plt.text(0.5, 0.5, "No responses", ha="center", va="center")
+        plt.axis("off")
+        plt.tight_layout()
+        fig.savefig(output_png, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        return
+
+    labels      = []
+    chi2_vals   = []
+    p_vals      = []
+    obs_counts  = []   # observed "doesnt allow & uses" count
+    exp_counts  = []   # expected "doesnt allow & uses" under independence
+    ns          = []
+    sig_markers = []   # *, **, ***, or ns
+
+    for r in pair_results:
+        # pull the four quadrant counts
+        a = r.quadrant_counts.get("Doesn't allow & Uses anyway", 0)
+        b = r.quadrant_counts.get("Doesn't allow & Doesn't use", 0)
+        c = r.quadrant_counts.get("Allows & Uses", 0)
+        d = r.quadrant_counts.get("Allows & Doesn't use", 0)
+
+        table = np.array([[a, b], [c, d]])
+
+        # need at least some data in every margin for chi2 to make sense.
+        # cant use any(table.sum(axis=x) == 0) here because numpy returns an
+        # array from the comparison, and python's any() chokes on that with a
+        # "truth value of an array is ambiguous" error. so we check explicitly.
+        row_sums = table.sum(axis=1)
+        col_sums = table.sum(axis=0)
+        if table.sum() < 5 or 0 in row_sums or 0 in col_sums:
+            labels.append(r.label)
+            chi2_vals.append(float("nan"))
+            p_vals.append(float("nan"))
+            obs_counts.append(a)
+            exp_counts.append(float("nan"))
+            ns.append(r.n_valid)
+            sig_markers.append("n/a")
+            continue
+
+        chi2, p, dof, expected = stats.chi2_contingency(table, correction=True)
+
+        # expected[0,0] corresponds to the "doesnt allow & uses" cell
+        exp_a = expected[0, 0]
+
+        labels.append(r.label)
+        chi2_vals.append(chi2)
+        p_vals.append(p)
+        obs_counts.append(a)
+        exp_counts.append(exp_a)
+        ns.append(r.n_valid)
+
+        # significance markers using standard thresholds
+        if   p < 0.001: sig_markers.append("***")
+        elif p < 0.01:  sig_markers.append("**")
+        elif p < 0.05:  sig_markers.append("*")
+        else:            sig_markers.append("ns")
+
+    # plot as a table-style figure. tried making this a bar chart initially but
+    # it was hard to read - a formatted text table is actually clearer here
+    # since the interesting part is the numbers not the shape
+    fig, ax = plt.subplots(figsize=(14, max(3.5, len(labels) * 0.8 + 3)))
+    ax.set_title(title, pad=20)
+    ax.axis("off")
+
+    col_labels = [
+        "Use case",
+        "Obs.\n(disallow\n& use)",
+        "Exp.\n(under\nindep.)",
+        "Obs/Exp\nratio",
+        "χ²",
+        "p-value",
+        "Sig.",
+        "n",
+    ]
+
+    cell_text = []
+    cell_colors = []
+    for i in range(len(labels)):
+        obs_v = obs_counts[i]
+        exp_v = exp_counts[i]
+
+        if np.isnan(exp_v) or exp_v == 0:
+            ratio_str = "-"
+        else:
+            ratio_str = f"{obs_v / exp_v:.2f}x"
+
+        chi2_str = f"{chi2_vals[i]:.2f}" if not np.isnan(chi2_vals[i]) else "-"
+
+        if np.isnan(p_vals[i]):
+            p_str = "-"
+        elif p_vals[i] < 0.0001:
+            p_str = "< .0001"
+        else:
+            p_str = f"{p_vals[i]:.4f}"
+
+        exp_str = f"{exp_v:.1f}" if not np.isnan(exp_v) else "-"
+
+        row = [
+            labels[i],
+            str(obs_v),
+            exp_str,
+            ratio_str,
+            chi2_str,
+            p_str,
+            sig_markers[i],
+            str(ns[i]),
+        ]
+        cell_text.append(row)
+
+        # color the significance column for visual pop
+        row_colors = ["white"] * len(col_labels)
+        sig = sig_markers[i]
+        if sig == "***":   row_colors[6] = "#fee0d2"
+        elif sig == "**":  row_colors[6] = "#fee0d2"
+        elif sig == "*":   row_colors[6] = "#fef0e6"
+        else:              row_colors[6] = "#e8f4e8"
+        cell_colors.append(row_colors)
+
+    tbl = ax.table(
+        cellText=cell_text,
+        colLabels=col_labels,
+        cellColours=cell_colors,
+        colColours=["#d5e8f0"] * len(col_labels),
+        loc="center",
+        cellLoc="center",
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(10)
+    tbl.scale(1, 1.8)
+
+    # make header row bold
+    for j in range(len(col_labels)):
+        tbl[0, j].set_text_props(fontweight="bold")
+
+    # footnote explaining what the test means
+    fig.text(
+        0.5, 0.02,
+        "χ² test of independence (Yates correction). H₀: belief and behavior are independent.\n"
+        "Obs/Exp > 1 means MORE people use-despite-disallowing than chance predicts.\n"
+        "* p < .05   ** p < .01   *** p < .001   ns = not significant",
+        ha="center", va="bottom", fontsize=9, style="italic",
+    )
+
+    plt.tight_layout(rect=[0, 0.08, 1, 1])
     fig.savefig(output_png, dpi=300, bbox_inches="tight")
     if SHOW_PLOTS:
         plt.show()
@@ -465,6 +835,14 @@ def run(xlsx_path: str) -> None:
 
     all_pair_results = []
 
+    # collectors for combined scatter/heatmap - we concatenate respondent-level
+    # scores across semesters rather than averaging, since the scatter needs
+    # individual data points not summary stats
+    all_full_perm    = []
+    all_full_usage   = []
+    all_matched_perm  = []
+    all_matched_usage = []
+
     for sem in SEMESTERS:
         sheet  = sem.sheet_name
         prefix = semester_prefix(sheet)
@@ -502,8 +880,14 @@ def run(xlsx_path: str) -> None:
             out_dir / f"{prefix}_grouped_bar.png",
         )
 
-        # build the full list of freq item cols for the scatter - includes items
-        # beyond the 4 matched pairs so the usage breadth score covers everything
+        # use ALL frequency items for the scatter, not just the 4 matched pairs.
+        # the x-axis (permissiveness) already covers all 11 permitted items, so
+        # the y-axis should cover all frequency items too. the axes arent measuring
+        # the exact same conceptual space this way (permitted has things like
+        # "write full essays" that have no frequency counterpart, and frequency has
+        # "understanding readings" that has no permitted counterpart) but thats fine -
+        # the question is whether broadly permissive people are also broad users,
+        # not whether specific item pairs line up. thats what the concordance is for.
         if sem.is_fall:
             freq_letters = [
                 ("AJ", "AK"),  # brainstorming
@@ -538,12 +922,107 @@ def run(xlsx_path: str) -> None:
 
         perm_sc, usage_sc, n_scatter = compute_scores(df, perm_code_col, freq_items)
 
-        plot_scatter(
+        # scatter with OLS regression line overlaid - reports slope, r, r^2, p
+        plot_scatter_regression(
             perm_sc, usage_sc, n_scatter,
-            f"{sheet}. Permissiveness vs. usage breadth\n"
-            f"Each dot = one respondent   (jittered to reduce overlap)\n"
+            f"{sheet}. FULL permissiveness vs. usage breadth (with OLS fit)\n"
+            f"X = all 11 permitted items, Y = all {len(freq_letters)} frequency items\n"
             f"N = {n_scatter}",
-            out_dir / f"{prefix}_scatter.png",
+            out_dir / f"{prefix}_full_scatter.png",
+        )
+
+        # heatmap version of the scatter - shows where the actual density clusters
+        # are, since the jittering in the scatter hides overlapping points
+        max_use_items = len(freq_letters)
+        plot_density_heatmap(
+            perm_sc, usage_sc, n_scatter, max_use_items,
+            f"{sheet}. FULL permissiveness vs. usage (density)\n"
+            f"Cell value = # of respondents at that coordinate\n"
+            f"X = all 11 permitted items, Y = all {len(freq_letters)} frequency items\n"
+            f"N = {n_scatter}",
+            out_dir / f"{prefix}_full_density_heatmap.png",
+        )
+
+        # for the combined full scatter we need both semesters on the same Y axis.
+        # translation and programming only exist in fall, so the shared set is the
+        # 9 items that appear in both semesters. for spring this is already what we
+        # computed above; for fall we recompute without the last two items.
+        if sem.is_fall:
+            shared_freq_letters = freq_letters[:9]  # everything except translation + programming
+            shared_freq_items = [
+                (get_col_name_by_letter(df, n), get_col_name_by_letter(df, l))
+                for n, l in shared_freq_letters
+            ]
+            shared_perm, shared_usage, _ = compute_scores(df, perm_code_col, shared_freq_items)
+        else:
+            # spring already uses 9 items
+            shared_perm, shared_usage = perm_sc, usage_sc
+
+        all_full_perm.extend(shared_perm)
+        all_full_usage.extend(shared_usage)
+
+        # --- matched-only versions of the scatter and heatmap ---
+        # these restrict BOTH axes to just the 4 use-cases that have a direct
+        # counterpart in both questions. the full versions above answer "are
+        # broadly permissive people also broad users?" while these answer the
+        # tighter question "does allowing these 4 specific tasks predict using
+        # AI for those exact 4 tasks?"
+        matched_freq_letters = []
+        matched_perm_codes   = set()
+        for mp in MATCHED_PAIRS:
+            matched_perm_codes.add(mp.permitted_code)
+            if sem.is_fall:
+                matched_freq_letters.append((mp.freq_code_col_letter_fall, mp.freq_label_col_letter_fall))
+            else:
+                matched_freq_letters.append((mp.freq_code_col_letter, mp.freq_label_col_letter))
+
+        matched_freq_items = [
+            (get_col_name_by_letter(df, n), get_col_name_by_letter(df, l))
+            for n, l in matched_freq_letters
+        ]
+
+        # restrict both axes - permitted_keys limits X to the 4 matched codes,
+        # matched_freq_items limits Y to the 4 matched frequency items
+        n_matched   = len(MATCHED_PAIRS)
+        matched_key = [mp.label for mp in MATCHED_PAIRS]
+
+        matched_perm_sc, matched_usage_sc, matched_n = compute_scores(
+            df, perm_code_col, matched_freq_items, permitted_keys=matched_perm_codes,
+        )
+
+        all_matched_perm.extend(matched_perm_sc)
+        all_matched_usage.extend(matched_usage_sc)
+
+        plot_scatter_regression(
+            matched_perm_sc, matched_usage_sc, matched_n,
+            f"{sheet}. MATCHED permissiveness vs. usage breadth (with OLS fit)\n"
+            f"Both axes restricted to {n_matched} matched use-cases\n"
+            f"N = {matched_n}",
+            out_dir / f"{prefix}_matched_scatter.png",
+            max_perm=n_matched,
+            matched_key=matched_key,
+        )
+
+        plot_density_heatmap(
+            matched_perm_sc, matched_usage_sc, matched_n, n_matched,
+            f"{sheet}. MATCHED permissiveness vs. usage (density)\n"
+            f"Cell value = # of respondents at that coordinate\n"
+            f"Both axes restricted to {n_matched} matched use-cases\n"
+            f"N = {matched_n}",
+            out_dir / f"{prefix}_matched_density_heatmap.png",
+            max_perm=n_matched,
+            matched_key=matched_key,
+        )
+
+        # chi-squared test per matched pair - is the "disallows but uses" group
+        # bigger than youd expect under independence? this is inherently a
+        # matched-only analysis since it needs the 1:1 pair between permitted
+        # items and frequency items
+        plot_significance(
+            pair_results,
+            f"{sheet}. Statistical significance of belief-behavior mismatch (MATCHED)\n"
+            f"Chi-squared test: is usage independent of stated beliefs?",
+            out_dir / f"{prefix}_matched_significance.png",
         )
 
     # combined averaged charts
@@ -566,4 +1045,49 @@ def run(xlsx_path: str) -> None:
             f"Mean of per-semester percentages ({sem_names})\n"
             f"Total respondents approx {approx_n}",
             out_dir / "combined_grouped_bar.png",
+        )
+
+    # combined scatter and heatmap charts - concatenate respondent-level data
+    # across semesters. for the full version we exclude translation + programming
+    # since those only exist in fall and averaging one semester isnt meaningful.
+    n_combined_full = len(all_full_perm)
+    if n_combined_full >= 3:
+        plot_scatter_regression(
+            all_full_perm, all_full_usage, n_combined_full,
+            f"Combined. FULL permissiveness vs. usage breadth (with OLS fit)\n"
+            f"X = all 11 permitted items, Y = 9 shared frequency items (no translation/programming)\n"
+            f"All respondents pooled, N = {n_combined_full}",
+            out_dir / "combined_full_scatter.png",
+        )
+
+        plot_density_heatmap(
+            all_full_perm, all_full_usage, n_combined_full, 9,
+            f"Combined. FULL permissiveness vs. usage (density)\n"
+            f"X = all 11 permitted items, Y = 9 shared frequency items (no translation/programming)\n"
+            f"All respondents pooled, N = {n_combined_full}",
+            out_dir / "combined_full_density_heatmap.png",
+        )
+
+    n_combined_matched = len(all_matched_perm)
+    n_matched = len(MATCHED_PAIRS)
+    matched_key = [mp.label for mp in MATCHED_PAIRS]
+    if n_combined_matched >= 3:
+        plot_scatter_regression(
+            all_matched_perm, all_matched_usage, n_combined_matched,
+            f"Combined. MATCHED permissiveness vs. usage breadth (with OLS fit)\n"
+            f"Both axes restricted to {n_matched} matched use-cases\n"
+            f"All respondents pooled, N = {n_combined_matched}",
+            out_dir / "combined_matched_scatter.png",
+            max_perm=n_matched,
+            matched_key=matched_key,
+        )
+
+        plot_density_heatmap(
+            all_matched_perm, all_matched_usage, n_combined_matched, n_matched,
+            f"Combined. MATCHED permissiveness vs. usage (density)\n"
+            f"Both axes restricted to {n_matched} matched use-cases\n"
+            f"All respondents pooled, N = {n_combined_matched}",
+            out_dir / "combined_matched_density_heatmap.png",
+            max_perm=n_matched,
+            matched_key=matched_key,
         )
