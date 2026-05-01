@@ -2,7 +2,7 @@
 #
 # visualizes manually-coded qualitative data from the open-ended question:
 #   "What are your thoughts on instructors using AI in your courses?
-#    (for example: using AI for feedback, assessment, or course design)" 
+#    (for example: using AI for feedback, assessment, or course design)"
 #
 # this question only exists in fall 2024. the coding was done by hand in excel.
 # each response was tagged with:
@@ -20,7 +20,9 @@
 # outputs go in output/should_profs_use/
 #   2024fall_should_bar.png            - should vs shouldn't vs not sure
 #   2024fall_sentiment_bar.png         - sentiment distribution
-#   2024fall_category_bar.png          - category frequency
+#   2024fall_category_should_bar.png   - reasons professors should use AI
+#   2024fall_category_shouldnt_bar.png - reasons professors should not use AI
+#   2024fall_category_neutral_bar.png  - neutral/nuanced themes
 #   2024fall_domain_comparison.png     - feedback vs assessment vs course design acceptance
 
 from __future__ import annotations
@@ -67,18 +69,21 @@ def normalize_should(raw):
     if is_blank(raw):
         return None
     txt = str(raw).strip().lower()
-    if txt == "should":
+    if txt == "yes":
         return "Should"
-    if txt == "shouldn't" or txt == "should not":
+    if txt == "no":
         return "Shouldn't"
-    if "not sure" in txt:
-        return "Not sure"
+    if "neutral" in txt:
+        return "Neutral"
+    if "mixed" in txt:
+        return "Mixed"
     return None
 
-SHOULD_ORDER = ["Should", "Not sure", "Shouldn't"]
+SHOULD_ORDER = ["Should", "Mixed", "Neutral", "Shouldn't"]
 SHOULD_COLORS = {
     "Should":    "#4575b4",
-    "Not sure":  "#fee08b",
+    "Mixed": "#fee08b",
+    "Neutral": "#fc8d59",
     "Shouldn't": "#d73027",
 }
 
@@ -89,19 +94,19 @@ def normalize_sentiment(raw):
     txt = str(raw).strip().lower()
     if "not strictly" in txt:
         return "Mixed"
-    if "not sure" in txt:
-        return "Not sure"
+    if "not sure" in txt or "uncertain" in txt:
+        return "Uncertain"
     if "positive" in txt:
         return "Positive"
     if "negative" in txt:
         return "Negative"
     return None
 
-SENTIMENT_ORDER = ["Positive", "Mixed", "Not sure", "Negative"]
+SENTIMENT_ORDER = ["Positive", "Mixed", "Uncertain", "Negative"]
 SENTIMENT_COLORS = {
     "Positive": "#4575b4",
     "Mixed":    "#fc8d59",
-    "Not sure": "#fee08b",
+    "Uncertain": "#fee08b",
     "Negative": "#d73027",
 }
 
@@ -115,18 +120,29 @@ def normalize_category(raw):
         return "Fairness/Hypocrisy"
     return txt
 
-CATEGORY_ORDER = [
-    "AI as Assistant",
+# categories split by whether they argue for, against, or are neutral on
+# professors using AI in courses
+SHOULD_CATEGORIES = [
+    "Useful",
+    "Saves Time",
+    "Benefits Students",
+]
+
+SHOULDNT_CATEGORIES = [
     "Impersonal",
     "Professional Role",
     "Fairness/Hypocrisy",
     "Unreliable",
-    "Useful",
-    "Saves Time",
-    "Benefits Students",
+]
+
+NEUTRAL_CATEGORIES = [
+    "AI as Assistant",
     "Depends on Course",
     "Transparency",
 ]
+
+# combined list for legacy reference
+CATEGORY_ORDER = SHOULD_CATEGORIES + SHOULDNT_CATEGORIES + NEUTRAL_CATEGORIES
 
 
 # ======= data extraction =======
@@ -137,6 +153,9 @@ def read_professor_sheet(xlsx_path, sheet_name):
     should_counts    = Counter()
     sentiment_counts = Counter()
     category_counts  = Counter()
+    should_cat_counts   = Counter()
+    shouldnt_cat_counts = Counter()
+    neutral_cat_counts  = Counter()
     n_responses      = 0
 
     # domain acceptance: only count rows that have an explicit yes/no,
@@ -172,6 +191,12 @@ def read_professor_sheet(xlsx_path, sheet_name):
             cat = normalize_category(row.get(col))
             if cat:
                 category_counts[cat] += 1
+                if cat in SHOULD_CATEGORIES:
+                    should_cat_counts[cat] += 1
+                elif cat in SHOULDNT_CATEGORIES:
+                    shouldnt_cat_counts[cat] += 1
+                elif cat in NEUTRAL_CATEGORIES:
+                    neutral_cat_counts[cat] += 1
 
         # domain acceptance columns
         for domain, excel_col in domain_col_map.items():
@@ -182,7 +207,9 @@ def read_professor_sheet(xlsx_path, sheet_name):
                 domain_counts[domain]["No"] += 1
             # blank or "n/a" -> skip, doesnt count toward either
 
-    return should_counts, sentiment_counts, category_counts, n_responses, domain_counts
+    return (should_counts, sentiment_counts, category_counts,
+            should_cat_counts, shouldnt_cat_counts, neutral_cat_counts,
+            n_responses, domain_counts)
 
 
 # ======= plot helpers =======
@@ -215,10 +242,14 @@ def plot_distribution(counts, order, colors, n_total, title, xlabel, output_png)
     plt.close(fig)
 
 
-def plot_category_bar(counts, n_total, title, output_png):
+def plot_category_bar(counts, n_total, title, output_png,
+                      category_order=None, bar_color=None, xlim_max=None):
     output_png.parent.mkdir(parents=True, exist_ok=True)
 
-    present = [(cat, counts.get(cat, 0)) for cat in CATEGORY_ORDER if counts.get(cat, 0) > 0]
+    if category_order is None:
+        category_order = CATEGORY_ORDER
+
+    present = [(cat, counts.get(cat, 0)) for cat in category_order if counts.get(cat, 0) > 0]
     present.sort(key=lambda x: x[1])
 
     if not present:
@@ -238,13 +269,16 @@ def plot_category_bar(counts, n_total, title, output_png):
     vals   = [v for _, v in present]
     pcts   = [v / n_total * 100.0 if n_total > 0 else 0 for v in vals]
 
-    bars = ax.barh(labels, pcts)
+    bars = ax.barh(labels, pcts, color=bar_color)
 
     for i, (bar, cnt, pct) in enumerate(zip(bars, vals, pcts)):
         ax.text(pct + 0.8, i, f"{pct:.0f}% ({cnt})", va="center", fontsize=9)
 
     ax.set_xlabel("% of responses citing this theme")
-    ax.set_xlim(0, max(pcts) * 1.3 if pcts else 50)
+    if xlim_max is not None:
+        ax.set_xlim(0, xlim_max)
+    else:
+        ax.set_xlim(0, max(pcts) * 1.3 if pcts else 50)
 
     fig.text(
         0.5, 0.01,
@@ -352,7 +386,9 @@ def run(xlsx_path: str) -> None:
 
     prefix = semester_prefix(SEM_LABEL)
 
-    should_counts, sentiment_counts, category_counts, n_resp, domain_counts = \
+    should_counts, sentiment_counts, category_counts, \
+        should_cat_counts, shouldnt_cat_counts, neutral_cat_counts, \
+        n_resp, domain_counts = \
         read_professor_sheet(coded_path, SHEET_NAME)
 
     # should/shouldn't bar
@@ -373,12 +409,38 @@ def run(xlsx_path: str) -> None:
         out_dir / f"{prefix}_sentiment_bar.png",
     )
 
-    # category bar
+    # category bars — split by should vs shouldn't vs neutral
+    # use a fixed x-axis across all three so smaller groups dont look inflated
+    xlim = 40
+
     plot_category_bar(
-        category_counts, n_resp,
-        f"{SEM_LABEL}. Why should/shouldn't professors use AI?\n"
+        should_cat_counts, n_resp,
+        f"{SEM_LABEL}. Reasons professors should use AI\n"
         f"Theme frequency from coded responses (N = {n_resp})",
-        out_dir / f"{prefix}_category_bar.png",
+        out_dir / f"{prefix}_category_should_bar.png",
+        category_order=SHOULD_CATEGORIES,
+        bar_color="#4575b4",
+        xlim_max=xlim,
+    )
+
+    plot_category_bar(
+        shouldnt_cat_counts, n_resp,
+        f"{SEM_LABEL}. Reasons professors should not use AI\n"
+        f"Theme frequency from coded responses (N = {n_resp})",
+        out_dir / f"{prefix}_category_shouldnt_bar.png",
+        category_order=SHOULDNT_CATEGORIES,
+        bar_color="#d73027",
+        xlim_max=xlim,
+    )
+
+    plot_category_bar(
+        neutral_cat_counts, n_resp,
+        f"{SEM_LABEL}. Neutral/nuanced themes on professors using AI\n"
+        f"Theme frequency from coded responses (N = {n_resp})",
+        out_dir / f"{prefix}_category_neutral_bar.png",
+        category_order=NEUTRAL_CATEGORIES,
+        bar_color="#fc8d59",
+        xlim_max=xlim,
     )
 
     # usage comparison

@@ -1,4 +1,4 @@
-# visualizations/shouldbetaught.py 
+# visualizations/shouldbetaught.py
 #
 # visualizes manually-coded qualitative data from the open-ended question:
 #   "Why do you think students should or should not learn about AI-based
@@ -16,11 +16,13 @@
 #   per semester:
 #     {prefix}_should_bar.png              - should vs shouldn't vs not sure
 #     {prefix}_sentiment_bar.png           - sentiment distribution
-#     {prefix}_category_bar.png            - category frequency (why they feel this way)
+#     {prefix}_category_should_bar.png     - reasons AI should be taught
+#     {prefix}_category_shouldnt_bar.png   - reasons AI should not be taught
 #   combined:
 #     combined_should_bar.png              - should/shouldn't side by side
 #     combined_sentiment_bar.png           - sentiment side by side
-#     combined_category_bar.png            - category frequency grouped by semester
+#     combined_category_should_bar.png     - "should" themes grouped by semester
+#     combined_category_shouldnt_bar.png   - "shouldn't" themes grouped by semester
 
 from __future__ import annotations
 from collections import Counter
@@ -93,19 +95,19 @@ def normalize_sentiment(raw):
         pass
     if "not strictly" in txt:
         return "Mixed"
-    if "not sure" in txt:
-        return "Not sure"
+    if "uncertain" in txt:
+        return "Uncertain"
     if "positive" in txt:
         return "Positive"
     if "negative" in txt:
         return "Negative"
     return None
 
-SENTIMENT_ORDER = ["Positive", "Mixed", "Not sure", "Negative"]
+SENTIMENT_ORDER = ["Positive", "Mixed", "Uncertain", "Negative"]
 SENTIMENT_COLORS = {
     "Positive": "#4575b4",
     "Mixed":    "#fc8d59",
-    "Not sure": "#fee08b",
+    "Uncertain": "#fee08b",
     "Negative": "#d73027",
 }
 
@@ -122,23 +124,27 @@ def normalize_category(raw):
         return "Saves Time"
     return txt
 
-# master list of categories in a sensible display order.
-# some categories are rare (scared, replaces professor's role) but we still
-# include them — the chart will just show a tiny bar
-CATEGORY_ORDER = [
-    "Understand the Tech",
+# categories split by whether they argue for or against teaching AI
+SHOULD_CATEGORIES = [
     "Useful",
-    "Inevitable",
+    "Understand the Tech",
     "Prepare for Future",
+    "Inevitable",
+    "Saves Time",
+]
+
+SHOULDNT_CATEGORIES = [
     "Over-reliance",
     "Cheating",
-    "Unreliable",
     "Already known about",
-    "Saves Time",
+    "Unreliable",
     "Uncreative Output",
     "Replaces professor's role",
     "Scared",
 ]
+
+# combined list for legacy/combined charts
+CATEGORY_ORDER = SHOULD_CATEGORIES + SHOULDNT_CATEGORIES
 
 
 # ======= data extraction =======
@@ -150,10 +156,9 @@ def read_coded_sheet(xlsx_path, sheet_name):
     should_counts    = Counter()
     sentiment_counts = Counter()
     category_counts  = Counter()
+    should_cat_counts   = Counter()  # categories arguing AI should be taught
+    shouldnt_cat_counts = Counter()  # categories arguing AI shouldn't be taught
     n_responses      = 0
-
-    # also track categories split by should/shouldn't for potential cross-tab later
-    cat_by_should = {}
 
     for _, row in df.iterrows():
         resp = str(row.get("Response:", "")).strip()
@@ -178,8 +183,13 @@ def read_coded_sheet(xlsx_path, sheet_name):
             cat = normalize_category(row.get(col))
             if cat:
                 category_counts[cat] += 1
+                if cat in SHOULD_CATEGORIES:
+                    should_cat_counts[cat] += 1
+                elif cat in SHOULDNT_CATEGORIES:
+                    shouldnt_cat_counts[cat] += 1
 
-    return should_counts, sentiment_counts, category_counts, n_responses
+    return (should_counts, sentiment_counts, category_counts,
+            should_cat_counts, shouldnt_cat_counts, n_responses)
 
 
 # ======= plot helpers =======
@@ -213,13 +223,17 @@ def plot_distribution(counts, order, colors, n_total, title, xlabel, output_png)
     plt.close(fig)
 
 
-def plot_category_bar(counts, n_total, title, output_png):
+def plot_category_bar(counts, n_total, title, output_png, category_order=None,
+                      bar_color=None, xlim_max=None):
     # horizontal bar chart for categories, sorted by frequency descending.
     # only shows categories that actually appeared (no empty bars)
     output_png.parent.mkdir(parents=True, exist_ok=True)
 
+    if category_order is None:
+        category_order = CATEGORY_ORDER
+
     # filter to categories that have at least 1 hit, sorted descending
-    present = [(cat, counts.get(cat, 0)) for cat in CATEGORY_ORDER if counts.get(cat, 0) > 0]
+    present = [(cat, counts.get(cat, 0)) for cat in category_order if counts.get(cat, 0) > 0]
     present.sort(key=lambda x: x[1])  # ascending for barh (top = highest)
 
     if not present:
@@ -239,13 +253,16 @@ def plot_category_bar(counts, n_total, title, output_png):
     vals   = [v for _, v in present]
     pcts   = [v / n_total * 100.0 if n_total > 0 else 0 for v in vals]
 
-    bars = ax.barh(labels, pcts)
+    bars = ax.barh(labels, pcts, color=bar_color)
 
     for i, (bar, cnt, pct) in enumerate(zip(bars, vals, pcts)):
         ax.text(pct + 0.8, i, f"{pct:.0f}% ({cnt})", va="center", fontsize=9)
 
     ax.set_xlabel("% of responses citing this theme")
-    ax.set_xlim(0, max(pcts) * 1.3 if pcts else 50)
+    if xlim_max is not None:
+        ax.set_xlim(0, xlim_max)
+    else:
+        ax.set_xlim(0, max(pcts) * 1.3 if pcts else 50)
 
     fig.text(
         0.5, 0.01,
@@ -297,14 +314,18 @@ def plot_combined_grouped(all_data, order, colors, title, xlabel, output_png):
     plt.close(fig)
 
 
-def plot_combined_categories(all_data, title, output_png):
+def plot_combined_categories(all_data, title, output_png, category_order=None,
+                             ylim_max=None):
     # grouped bar comparing category frequencies across semesters
     # all_data: list of (semester_label, category_counts, n_total)
     output_png.parent.mkdir(parents=True, exist_ok=True)
 
+    if category_order is None:
+        category_order = CATEGORY_ORDER
+
     # only show categories that appear in at least one semester
     present_cats = []
-    for cat in CATEGORY_ORDER:
+    for cat in category_order:
         if any(counts.get(cat, 0) > 0 for _, counts, _ in all_data):
             present_cats.append(cat)
 
@@ -338,6 +359,8 @@ def plot_combined_categories(all_data, title, output_png):
     ax.set_xticks(x)
     ax.set_xticklabels(present_cats, rotation=30, ha="right")
     ax.set_ylabel("% of responses citing this theme")
+    if ylim_max is not None:
+        ax.set_ylim(0, ylim_max)
     ax.legend(frameon=False)
 
     fig.text(0.5, 0.01, "One response can cite multiple themes. Percentages are per-semester.",
@@ -356,6 +379,14 @@ SHEETS = [
     ("Spring 2024", 'Spring 2024 "Should be Taught"'),
     ("Fall 2024",   'Fall 2024 "Should be Taught"'),
 ]
+
+# fixed x-axis limits per semester so charts are visually comparable
+# within each semester's should vs shouldn't pair
+SEMESTER_XLIM = {
+    "Spring 2024": 50,
+    "Fall 2024":   40,
+}
+COMBINED_YLIM = 50
 
 
 # ======= main =======
@@ -383,17 +414,22 @@ def run(xlsx_path: str) -> None:
     all_should    = []
     all_sentiment = []
     all_category  = []
+    all_should_cat   = []
+    all_shouldnt_cat = []
 
     for sem_label, sheet_name in SHEETS:
         prefix = semester_prefix(sem_label)
 
-        should_counts, sentiment_counts, category_counts, n_resp = read_coded_sheet(
+        (should_counts, sentiment_counts, category_counts,
+         should_cat_counts, shouldnt_cat_counts, n_resp) = read_coded_sheet(
             coded_path, sheet_name,
         )
 
         all_should.append((sem_label, should_counts, n_resp))
         all_sentiment.append((sem_label, sentiment_counts, n_resp))
         all_category.append((sem_label, category_counts, n_resp))
+        all_should_cat.append((sem_label, should_cat_counts, n_resp))
+        all_shouldnt_cat.append((sem_label, shouldnt_cat_counts, n_resp))
 
         # per-semester should bar
         plot_distribution(
@@ -413,12 +449,27 @@ def run(xlsx_path: str) -> None:
             out_dir / f"{prefix}_sentiment_bar.png",
         )
 
-        # per-semester category bar
+        # per-semester category bars — split by should vs shouldn't
+        xlim = SEMESTER_XLIM.get(sem_label)
+
         plot_category_bar(
-            category_counts, n_resp,
-            f"{sem_label}. Why should/shouldn't AI be taught?\n"
+            should_cat_counts, n_resp,
+            f"{sem_label}. Reasons AI should be taught\n"
             f"Theme frequency from coded responses (N = {n_resp})",
-            out_dir / f"{prefix}_category_bar.png",
+            out_dir / f"{prefix}_category_should_bar.png",
+            category_order=SHOULD_CATEGORIES,
+            bar_color="#4575b4",
+            xlim_max=xlim,
+        )
+
+        plot_category_bar(
+            shouldnt_cat_counts, n_resp,
+            f"{sem_label}. Reasons AI should not be taught\n"
+            f"Theme frequency from coded responses (N = {n_resp})",
+            out_dir / f"{prefix}_category_shouldnt_bar.png",
+            category_order=SHOULDNT_CATEGORIES,
+            bar_color="#d73027",
+            xlim_max=xlim,
         )
 
     # combined charts
@@ -438,8 +489,17 @@ def run(xlsx_path: str) -> None:
         )
 
         plot_combined_categories(
-            all_category,
-            "Theme frequency comparison: Why should/shouldn't AI be taught?\n"
-            "Spring 2024 vs Fall 2024",
-            out_dir / "combined_category_bar.png",
+            all_should_cat,
+            "Reasons AI should be taught (Spring 2024 vs Fall 2024)",
+            out_dir / "combined_category_should_bar.png",
+            category_order=SHOULD_CATEGORIES,
+            ylim_max=COMBINED_YLIM,
+        )
+
+        plot_combined_categories(
+            all_shouldnt_cat,
+            "Reasons AI should not be taught (Spring 2024 vs Fall 2024)",
+            out_dir / "combined_category_shouldnt_bar.png",
+            category_order=SHOULDNT_CATEGORIES,
+            ylim_max=COMBINED_YLIM,
         )
